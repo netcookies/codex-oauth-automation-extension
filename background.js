@@ -67,7 +67,7 @@ const PERSISTED_SETTING_DEFAULTS = {
   emailGenerator: 'duck', // 注册邮箱生成方式：duck / cloudflare。
   inbucketHost: '', // 仅当 mailProvider 为 inbucket 时填写 Inbucket 地址，其他情况保持为空。
   inbucketMailbox: '', // 仅当 mailProvider 为 inbucket 时填写邮箱名，其他情况保持为空。
-  hotmailServiceMode: HOTMAIL_SERVICE_MODE_REMOTE, // Hotmail 服务模式：远程服务 / 本地助手。
+  hotmailServiceMode: HOTMAIL_SERVICE_MODE_LOCAL, // Hotmail 服务模式：远程服务 / 本地助手。
   hotmailRemoteBaseUrl: DEFAULT_HOTMAIL_REMOTE_BASE_URL, // Hotmail 远程服务地址。
   hotmailLocalBaseUrl: DEFAULT_HOTMAIL_LOCAL_BASE_URL, // Hotmail 本地 helper 地址。
   cloudflareDomain: '', // 仅当 emailGenerator=cloudflare 时填写自定义域名。
@@ -198,9 +198,7 @@ function normalizeCloudflareDomains(values) {
 }
 
 function normalizeHotmailServiceMode(rawValue = '') {
-  return String(rawValue || '').trim().toLowerCase() === HOTMAIL_SERVICE_MODE_LOCAL
-    ? HOTMAIL_SERVICE_MODE_LOCAL
-    : HOTMAIL_SERVICE_MODE_REMOTE;
+  return HOTMAIL_SERVICE_MODE_LOCAL;
 }
 
 function normalizeHotmailRemoteBaseUrl(rawValue = '') {

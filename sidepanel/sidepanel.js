@@ -73,6 +73,7 @@ const inputHotmailRefreshToken = document.getElementById('input-hotmail-refresh-
 const inputHotmailImport = document.getElementById('input-hotmail-import');
 const btnAddHotmailAccount = document.getElementById('btn-add-hotmail-account');
 const btnImportHotmailAccounts = document.getElementById('btn-import-hotmail-accounts');
+const btnHotmailUsageGuide = document.getElementById('btn-hotmail-usage-guide');
 const btnClearUsedHotmailAccounts = document.getElementById('btn-clear-used-hotmail-accounts');
 const btnDeleteAllHotmailAccounts = document.getElementById('btn-delete-all-hotmail-accounts');
 const btnToggleHotmailList = document.getElementById('btn-toggle-hotmail-list');
@@ -623,9 +624,7 @@ function normalizeLocalCpaStep9Mode(value = '') {
 }
 
 function normalizeHotmailServiceMode(value = '') {
-  return String(value || '').trim().toLowerCase() === HOTMAIL_SERVICE_MODE_LOCAL
-    ? HOTMAIL_SERVICE_MODE_LOCAL
-    : HOTMAIL_SERVICE_MODE_REMOTE;
+  return HOTMAIL_SERVICE_MODE_LOCAL;
 }
 
 function getSelectedLocalCpaStep9Mode() {
@@ -650,7 +649,10 @@ function getSelectedHotmailServiceMode() {
 function setHotmailServiceMode(mode) {
   const resolvedMode = normalizeHotmailServiceMode(mode);
   hotmailServiceModeButtons.forEach((button) => {
+    const isRemoteMode = button.dataset.hotmailServiceMode === HOTMAIL_SERVICE_MODE_REMOTE;
     const active = button.dataset.hotmailServiceMode === resolvedMode;
+    button.disabled = isRemoteMode;
+    button.setAttribute('aria-disabled', String(isRemoteMode));
     button.classList.toggle('is-active', active);
     button.setAttribute('aria-pressed', String(active));
   });
@@ -1221,7 +1223,7 @@ function updateMailProviderUI() {
   }
   if (autoHintText) {
     autoHintText.textContent = useHotmail
-      ? `请先校验并选择一个 Hotmail 账号（当前：${hotmailServiceMode === HOTMAIL_SERVICE_MODE_LOCAL ? '本地助手' : '远程服务'}）`
+      ? '请先校验并选择一个 Hotmail 账号'
       : '先自动获取邮箱，或手动粘贴邮箱后再继续';
   }
   if (useHotmail) {
@@ -1790,6 +1792,15 @@ btnToggleHotmailList?.addEventListener('click', () => {
   setHotmailListExpanded(!hotmailListExpanded);
 });
 
+btnHotmailUsageGuide?.addEventListener('click', async () => {
+  await openConfirmModal({
+    title: '使用教程',
+    message: '由于第三方服务接口结构不同，所以暂时无法使用，如果您的token可以直连微软，请测试本地功能，详细功能请看项目根目录的readme文件',
+    confirmLabel: '确定',
+    confirmVariant: 'btn-primary',
+  });
+});
+
 btnClearUsedHotmailAccounts?.addEventListener('click', async () => {
   if (hotmailActionInFlight) return;
   hotmailActionInFlight = true;
@@ -2037,6 +2048,9 @@ localCpaStep9ModeButtons.forEach((button) => {
 
 hotmailServiceModeButtons.forEach((button) => {
   button.addEventListener('click', () => {
+    if (button.disabled) {
+      return;
+    }
     const nextMode = button.dataset.hotmailServiceMode;
     if (getSelectedHotmailServiceMode() === normalizeHotmailServiceMode(nextMode)) {
       return;
