@@ -14,6 +14,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     || message.type === 'PREPARE_LOGIN_CODE'
     || message.type === 'PREPARE_SIGNUP_VERIFICATION'
     || message.type === 'RESEND_VERIFICATION_CODE'
+    || message.type === 'FILL_PHONE'
+    || message.type === 'FILL_PHONE_SMS_CODE'
   ) {
     resetStopState();
     handleCommand(message).then((result) => {
@@ -64,6 +66,10 @@ async function handleCommand(message) {
       return getStep8State();
     case 'STEP8_TRIGGER_CONTINUE':
       return await step8_triggerContinue(message.payload);
+    case 'FILL_PHONE':
+      return await fillPhoneNumber(message.payload);
+    case 'FILL_PHONE_SMS_CODE':
+      return await fillPhoneSmsCode(message.payload);
   }
 }
 
@@ -1419,4 +1425,235 @@ async function step5_fillNameBirthday(payload) {
 
   log(`步骤 5：资料已通过。`, 'ok');
   reportComplete(5, { addPhonePage: Boolean(outcome.addPhonePage) });
+}
+
+// ============================================================
+// Phone Number Fill (Hero SMS integration)
+// ============================================================
+
+async function fillPhoneNumber(payload = {}) {
+  const { isoCountryCode, localNumber, countryCode, phoneNumber } = payload;
+  const numberToFill = localNumber || phoneNumber;
+  if (!numberToFill) {
+    throw new Error('fillPhoneNumber: 缺少 phoneNumber 参数。');
+  }
+
+  log(`填写手机号：国家=${isoCountryCode || countryCode || '?'} 号码=${numberToFill}`);
+
+  // Wait for phone input to appear
+  const phoneInput = await waitForPhoneInput(10000);
+  if (!phoneInput) {
+    throw new Error('未找到手机号输入框。URL: ' + location.href);
+  }
+
+  // Try to select country if ISO code is provided (e.g. "GB", "US")
+  if (isoCountryCode) {
+    await trySelectCountryByIsoCode(isoCountryCode);
+  } else if (countryCode) {
+    await trySelectCountryCode(countryCode);
+  }
+
+  // Fill the phone number (should be local number without country code)
+  phoneInput.focus();
+  await humanPause(200, 500);
+  fillInput(phoneInput, numberToFill);
+  await humanPause(300, 600);
+
+  // Click continue/submit button
+  const submitBtn = findPhoneSubmitButton();
+  if (!submitBtn) {
+    throw new Error('未找到手机号提交按钮。URL: ' + location.href);
+  }
+
+  simulateClick(submitBtn);
+  log('手机号已填写并点击提交。');
+  await humanPause(1000, 2000);
+}
+
+async function fillPhoneSmsCode(payload = {}) {
+  const { code } = payload;
+  if (!code) {
+    throw new Error('fillPhoneSmsCode: 缺少 code 参数。');
+  }
+
+  log(`填写 SMS 验证码：${code}`);
+
+  // Wait for code input to appear (could be a single input or split inputs)
+  const start = Date.now();
+  while (Date.now() - start < 15000) {
+    // Check for a 6-digit code input
+    const codeInput = document.querySelector(
+      'input[type="tel"][maxlength="6"], input[type="text"][maxlength="6"], input[name*="code" i], input[autocomplete="one-time-code"]'
+    );
+    if (codeInput && isVisibleElement(codeInput)) {
+      codeInput.focus();
+      await humanPause(200, 400);
+      fillInput(codeInput, code);
+      await humanPause(300, 600);
+
+      // Try to submit
+      const submitBtn = findPhoneSubmitButton();
+      if (submitBtn) {
+        simulateClick(submitBtn);
+      }
+      log('SMS 验证码已填写并提交。');
+      await humanPause(1000, 2000);
+      return;
+    }
+
+    // Check for split digit inputs
+    const splitInputs = Array.from(document.querySelectorAll('input[maxlength="1"]'))
+      .filter(isVisibleElement);
+    if (splitInputs.length >= 6) {
+      for (let i = 0; i < Math.min(code.length, splitInputs.length); i++) {
+        splitInputs[i].focus();
+        fillInput(splitInputs[i], code[i]);
+        await humanPause(50, 100);
+      }
+      await humanPause(500, 800);
+      const submitBtn = findPhoneSubmitButton();
+      if (submitBtn) {
+        simulateClick(submitBtn);
+      }
+      log('SMS 验证码已填写（拆分输入框）并提交。');
+      await humanPause(1000, 2000);
+      return;
+    }
+
+    await sleep(500);
+  }
+
+  throw new Error('未找到 SMS 验证码输入框。URL: ' + location.href);
+}
+
+async function waitForPhoneInput(timeoutMs = 10000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    // Use querySelectorAll + find to skip hidden inputs that match by name
+    const inputs = document.querySelectorAll(
+      'input[type="tel"]:not([maxlength="6"]), input[name*="phone" i]:not([type="hidden"]), input[id*="phone" i]:not([type="hidden"]), input[autocomplete="tel"]'
+    );
+    const input = Array.from(inputs).find(isVisibleElement);
+    if (input) {
+      return input;
+    }
+    await sleep(500);
+  }
+  return null;
+}
+
+async function trySelectCountryByIsoCode(isoCode) {
+  if (!isoCode) return;
+  const upperCode = isoCode.toUpperCase();
+  log(`尝试选择国家：${upperCode}`);
+
+  // OpenAI uses a hidden native <select> mirroring the react-aria Select
+  const hiddenContainer = document.querySelector('[data-testid="hidden-select-container"]');
+  if (hiddenContainer) {
+    const nativeSelect = hiddenContainer.querySelector('select');
+    if (nativeSelect) {
+      const targetOption = Array.from(nativeSelect.options).find((opt) => opt.value === upperCode);
+      if (targetOption && nativeSelect.value !== upperCode) {
+        nativeSelect.value = upperCode;
+        nativeSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        nativeSelect.dispatchEvent(new Event('input', { bubbles: true }));
+        log(`已通过隐藏 select 选择国家：${upperCode} (${targetOption.textContent})`);
+        await humanPause(300, 600);
+        return;
+      } else if (targetOption) {
+        log(`国家已是 ${upperCode}，无需切换。`);
+        return;
+      }
+    }
+  }
+
+  // Fallback: click react-aria Select button, then pick from listbox
+  const ariaBtn = document.querySelector('button[aria-haspopup="listbox"]');
+  if (ariaBtn && isVisibleElement(ariaBtn)) {
+    simulateClick(ariaBtn);
+    await humanPause(400, 800);
+
+    const listbox = document.querySelector('[role="listbox"]');
+    if (listbox) {
+      const options = listbox.querySelectorAll('[role="option"]');
+      for (const opt of options) {
+        // Match by data-key, value attribute, or option text containing the code
+        const key = opt.getAttribute('data-key') || opt.getAttribute('value') || '';
+        if (key === upperCode || (opt.textContent || '').includes(`(+`)) {
+          // More precise: check if this option's key matches
+          if (key === upperCode) {
+            simulateClick(opt);
+            log(`已通过 listbox 选择国家：${upperCode}`);
+            await humanPause(200, 400);
+            return;
+          }
+        }
+      }
+      // Close dropdown if no match
+      simulateClick(ariaBtn);
+      await humanPause(100, 200);
+    }
+  }
+
+  log(`未能选择国家 ${upperCode}，将使用页面默认国家。`, 'warn');
+}
+
+async function trySelectCountryCode(countryCode) {
+  if (!countryCode) return;
+  // Try native <select> for country code
+  const selects = document.querySelectorAll('select');
+  for (const select of selects) {
+    const options = Array.from(select.options);
+    const match = options.find((opt) => {
+      const text = (opt.textContent || '') + ' ' + (opt.value || '');
+      return text.includes(countryCode);
+    });
+    if (match) {
+      select.value = match.value;
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      await humanPause(200, 400);
+      return;
+    }
+  }
+
+  // Try react-aria or custom dropdown with country code
+  const buttons = document.querySelectorAll('button[aria-haspopup="listbox"], [role="combobox"], [class*="country" i], [class*="phone-code" i]');
+  for (const btn of buttons) {
+    if (!isVisibleElement(btn)) continue;
+    const btnText = (btn.textContent || '').trim();
+    // If already showing the correct country code, skip
+    if (btnText.includes(countryCode)) return;
+
+    // Click to open dropdown
+    simulateClick(btn);
+    await humanPause(300, 600);
+
+    // Try to find and click the matching option
+    const listbox = document.querySelector('[role="listbox"]');
+    if (listbox) {
+      const options = listbox.querySelectorAll('[role="option"], li');
+      for (const opt of options) {
+        if ((opt.textContent || '').includes(countryCode)) {
+          simulateClick(opt);
+          await humanPause(200, 400);
+          return;
+        }
+      }
+      // Close by clicking button again if no match found
+      simulateClick(btn);
+      await humanPause(100, 200);
+    }
+  }
+}
+
+function findPhoneSubmitButton() {
+  // Look for submit button on phone page
+  const submitBtn = document.querySelector('button[type="submit"]');
+  if (submitBtn && isVisibleElement(submitBtn)) return submitBtn;
+
+  const buttons = document.querySelectorAll('button, [role="button"]');
+  return Array.from(buttons).find((el) => {
+    if (!isVisibleElement(el)) return false;
+    return CONTINUE_ACTION_PATTERN.test(getActionText(el));
+  }) || null;
 }

@@ -66,6 +66,9 @@ const PERSISTED_SETTING_DEFAULTS = {
   sub2apiPassword: '',
   sub2apiGroupName: DEFAULT_SUB2API_GROUP_NAME,
   customPassword: '',
+  smsProvider: 'none',
+  heroSmsApiKey: '',
+  heroSmsCountry: 0,
   autoRunSkipFailures: false,
   autoRunFallbackThreadIntervalMinutes: 0,
   autoRunDelayEnabled: false,
@@ -350,6 +353,14 @@ function normalizePersistentSettingValue(key, value) {
       return String(value || '').trim();
     case 'customPassword':
       return String(value || '');
+    case 'smsProvider':
+      return value === 'hero-sms' ? 'hero-sms' : 'none';
+    case 'heroSmsApiKey':
+      return String(value || '').trim();
+    case 'heroSmsCountry': {
+      const n = Number(value);
+      return Number.isFinite(n) && n >= 0 ? n : 0;
+    }
     case 'autoRunSkipFailures':
     case 'autoRunDelayEnabled':
       return Boolean(value);
@@ -3798,6 +3809,9 @@ async function legacyAutoRunLoop(totalRuns, options = {}) {
         vpsUrl: prevState.vpsUrl,
         vpsPassword: prevState.vpsPassword,
         customPassword: prevState.customPassword,
+        smsProvider: prevState.smsProvider,
+        heroSmsApiKey: prevState.heroSmsApiKey,
+        heroSmsCountry: prevState.heroSmsCountry,
         autoRunSkipFailures: prevState.autoRunSkipFailures,
         autoRunFallbackThreadIntervalMinutes: prevState.autoRunFallbackThreadIntervalMinutes,
         autoRunDelayEnabled: prevState.autoRunDelayEnabled,
@@ -4316,6 +4330,9 @@ async function autoRunLoop(totalRuns, options = {}) {
           vpsUrl: prevState.vpsUrl,
           vpsPassword: prevState.vpsPassword,
           customPassword: prevState.customPassword,
+          smsProvider: prevState.smsProvider,
+          heroSmsApiKey: prevState.heroSmsApiKey,
+          heroSmsCountry: prevState.heroSmsCountry,
           autoRunSkipFailures: prevState.autoRunSkipFailures,
           autoRunFallbackThreadIntervalMinutes: prevState.autoRunFallbackThreadIntervalMinutes,
           autoRunDelayEnabled: prevState.autoRunDelayEnabled,
@@ -5415,6 +5432,363 @@ async function ensureStep8SignupPageReady(tabId, options = {}) {
   });
 }
 
+// ============================================================
+// Hero SMS 接码服务 API
+// ============================================================
+
+const HERO_SMS_BASE_URL = 'https://hero-sms.com/stubs/handler_api.php';
+const HERO_SMS_SERVICE_CODE = 'dr'; // OpenAI
+const HERO_SMS_POLL_INTERVAL_MS = 3000;
+const HERO_SMS_POLL_TIMEOUT_MS = 120000;
+
+async function heroSmsRequest(apiKey, action, params = {}) {
+  const url = new URL(HERO_SMS_BASE_URL);
+  url.searchParams.set('api_key', apiKey);
+  url.searchParams.set('action', action);
+  for (const [k, v] of Object.entries(params)) {
+    url.searchParams.set(k, String(v));
+  }
+
+  const resp = await fetch(url.toString(), { method: 'GET' });
+  if (!resp.ok) {
+    throw new Error(`Hero SMS API 请求失败（HTTP ${resp.status}）`);
+  }
+
+  const contentType = resp.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    return resp.json();
+  }
+  return resp.text();
+}
+
+async function heroSmsGetBalance(apiKey) {
+  const result = await heroSmsRequest(apiKey, 'getBalance');
+  if (typeof result === 'string' && result.startsWith('ACCESS_BALANCE:')) {
+    return parseFloat(result.split(':')[1]);
+  }
+  throw new Error(`Hero SMS 余额查询失败：${result}`);
+}
+
+async function heroSmsGetNumber(apiKey, country) {
+  const result = await heroSmsRequest(apiKey, 'getNumberV2', {
+    service: HERO_SMS_SERVICE_CODE,
+    country: country,
+  });
+
+  if (typeof result === 'string') {
+    if (result === 'NO_NUMBERS') {
+      throw new Error('Hero SMS 当前无可用号码，请稍后重试或更换国家。');
+    }
+    if (result === 'NO_BALANCE') {
+      throw new Error('Hero SMS 余额不足，请先充值。');
+    }
+    if (result === 'BAD_KEY') {
+      throw new Error('Hero SMS API Key 无效，请检查配置。');
+    }
+    throw new Error(`Hero SMS 获取号码失败：${result}`);
+  }
+
+  if (result && result.activationId && result.phoneNumber) {
+    return {
+      activationId: result.activationId,
+      phoneNumber: result.phoneNumber,
+      countryPhoneCode: result.countryPhoneCode || '',
+    };
+  }
+
+  throw new Error(`Hero SMS 获取号码返回格式异常：${JSON.stringify(result)}`);
+}
+
+async function heroSmsSetStatus(apiKey, activationId, status) {
+  return heroSmsRequest(apiKey, 'setStatus', { id: activationId, status });
+}
+
+async function heroSmsPollCode(apiKey, activationId, timeoutMs = HERO_SMS_POLL_TIMEOUT_MS) {
+  const start = Date.now();
+  let pollCount = 0;
+
+  // Tell the platform we've submitted the phone and are waiting for SMS
+  try {
+    const setStatusResult = await heroSmsSetStatus(apiKey, activationId, 1);
+    await addLog(`[Hero SMS] setStatus(1) 结果：${typeof setStatusResult === 'string' ? setStatusResult : JSON.stringify(setStatusResult)}`, 'info');
+  } catch (e) {
+    await addLog(`[Hero SMS] setStatus(1) 失败（非致命）：${e.message}`, 'warn');
+  }
+
+  await addLog(`[Hero SMS] 开始轮询验证码，激活ID: ${activationId}，超时: ${timeoutMs / 1000}s，间隔: ${HERO_SMS_POLL_INTERVAL_MS / 1000}s`, 'info');
+
+  while (Date.now() - start < timeoutMs) {
+    throwIfStopped();
+    pollCount++;
+    const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+
+    // Use getStatus (V1) for simpler text-based responses
+    const result = await heroSmsRequest(apiKey, 'getStatus', { id: activationId });
+
+    if (typeof result === 'string') {
+      // V1 returns STATUS_WAIT_CODE, STATUS_OK:<code>, STATUS_CANCEL, etc.
+      if (result === 'STATUS_WAIT_CODE' || result === 'STATUS_WAIT_RETRY' || result === 'STATUS_WAIT_RESEND') {
+        // Log every 10th poll or the first one
+        if (pollCount === 1 || pollCount % 10 === 0) {
+          await addLog(`[Hero SMS] 轮询 #${pollCount}（${elapsed}s）：${result}`, 'info');
+        }
+        await sleepWithStop(HERO_SMS_POLL_INTERVAL_MS);
+        continue;
+      }
+      if (result.startsWith('STATUS_OK:')) {
+        const code = result.split(':').slice(1).join(':').trim();
+        await addLog(`[Hero SMS] 轮询 #${pollCount}（${elapsed}s）：收到验证码！`, 'info');
+        if (code) return code;
+      }
+      if (result === 'STATUS_CANCEL') {
+        await addLog(`[Hero SMS] 轮询 #${pollCount}（${elapsed}s）：激活已被取消`, 'error');
+        throw new Error('Hero SMS 激活已被取消。');
+      }
+      // Unknown text status — could be error or transient, log and keep polling
+      await addLog(`[Hero SMS] 轮询 #${pollCount}（${elapsed}s）未知状态：${result}`, 'warn');
+      await sleepWithStop(HERO_SMS_POLL_INTERVAL_MS);
+      continue;
+    }
+
+    // Handle JSON response (in case API returns JSON instead of plain text)
+    if (result && typeof result === 'object') {
+      // V2-style JSON: { verificationType, sms, call }
+      if (result.sms) {
+        const sms = Array.isArray(result.sms) ? result.sms[0] : result.sms;
+        if (sms && sms.code) {
+          await addLog(`[Hero SMS] 轮询 #${pollCount}（${elapsed}s）：JSON 收到验证码！`, 'info');
+          return sms.code;
+        }
+      }
+      if (pollCount === 1 || pollCount % 10 === 0) {
+        await addLog(`[Hero SMS] 轮询 #${pollCount}（${elapsed}s）：JSON 等待中 (verificationType=${result.verificationType})`, 'info');
+      }
+      await sleepWithStop(HERO_SMS_POLL_INTERVAL_MS);
+      continue;
+    }
+
+    await addLog(`[Hero SMS] 轮询 #${pollCount}（${elapsed}s）：意外响应类型 ${typeof result}`, 'warn');
+    await sleepWithStop(HERO_SMS_POLL_INTERVAL_MS);
+  }
+
+  await addLog(`[Hero SMS] 轮询共 ${pollCount} 次，总耗时 ${((Date.now() - start) / 1000).toFixed(1)}s，超时`, 'error');
+  throw new Error(`Hero SMS 等待验证码超时（${timeoutMs / 1000} 秒），共轮询 ${pollCount} 次。`);
+}
+
+async function heroSmsFinishActivation(apiKey, activationId) {
+  try {
+    return await heroSmsRequest(apiKey, 'finishActivation', { id: activationId });
+  } catch {
+    // Fallback to setStatus(6) if finishActivation not available
+    return heroSmsRequest(apiKey, 'setStatus', { id: activationId, status: 6 });
+  }
+}
+
+async function heroSmsCancelActivation(apiKey, activationId) {
+  try {
+    return await heroSmsRequest(apiKey, 'cancelActivation', { id: activationId });
+  } catch {
+    // Best-effort cancel, don't throw
+  }
+}
+
+// ============================================================
+// Hero SMS: handleAddPhonePage — 自动处理手机号验证
+// ============================================================
+
+const HERO_SMS_COUNTRY_PHONE_CODES = {
+  12: '+1', 16: '+44', 175: '+7', 56: '+62', 6: '+91', 36: '+55', 4: '+1', 151: '+63',
+};
+
+const HERO_SMS_COUNTRY_CALLING_CODES = {
+  12: '1', 16: '44', 175: '7', 56: '62', 6: '91', 36: '55', 4: '1', 151: '63',
+};
+
+const HERO_SMS_COUNTRY_ISO_CODES = {
+  12: 'US', 16: 'GB', 175: 'RU', 56: 'ID', 6: 'IN', 36: 'BR', 4: 'CA', 151: 'PH',
+};
+
+// Calling code → ISO (fallback for countries not in HERO_SMS_COUNTRY_ISO_CODES)
+const CALLING_CODE_TO_ISO = {
+  '1': 'US', '7': 'RU', '44': 'GB', '55': 'BR', '62': 'ID', '63': 'PH',
+  '91': 'IN', '81': 'JP', '82': 'KR', '49': 'DE', '33': 'FR', '34': 'ES',
+  '39': 'IT', '61': 'AU', '86': 'CN', '52': 'MX', '90': 'TR', '48': 'PL',
+  '31': 'NL', '46': 'SE', '47': 'NO', '45': 'DK', '358': 'FI', '351': 'PT',
+  '30': 'GR', '36': 'HU', '40': 'RO', '380': 'UA', '84': 'VN', '66': 'TH',
+  '60': 'MY', '65': 'SG', '880': 'BD', '92': 'PK', '234': 'NG', '254': 'KE',
+  '27': 'ZA', '20': 'EG', '212': 'MA', '51': 'PE', '56': 'CL', '57': 'CO',
+  '54': 'AR', '53': 'CU', '593': 'EC', '94': 'LK', '95': 'MM', '977': 'NP',
+};
+
+function heroSmsStripCountryCode(phoneNumber, countryPhoneCode) {
+  const code = String(countryPhoneCode || '');
+  if (code && phoneNumber.startsWith(code)) {
+    return phoneNumber.slice(code.length);
+  }
+  return phoneNumber;
+}
+
+function heroSmsResolveIsoCode(heroSmsCountryId, callingCode) {
+  return HERO_SMS_COUNTRY_ISO_CODES[heroSmsCountryId]
+    || CALLING_CODE_TO_ISO[String(callingCode || '')]
+    || '';
+}
+
+async function heroSmsGetPrices(apiKey, country) {
+  const params = { service: HERO_SMS_SERVICE_CODE };
+  if (country) params.country = country;
+  const result = await heroSmsRequest(apiKey, 'getPrices', params);
+
+  // getPrices returns { "countryId": { "serviceCode": { cost, count, physicalCount } }, ... }
+  // Sometimes wrapped in an array: [{ "countryId": { ... } }]
+  let priceMap = result;
+  if (Array.isArray(result)) {
+    priceMap = {};
+    for (const item of result) {
+      if (item && typeof item === 'object') Object.assign(priceMap, item);
+    }
+  }
+
+  const candidates = [];
+  if (priceMap && typeof priceMap === 'object') {
+    for (const [countryId, services] of Object.entries(priceMap)) {
+      if (!services || typeof services !== 'object') continue;
+      const svc = services[HERO_SMS_SERVICE_CODE];
+      if (svc && (svc.count || 0) > 0) {
+        candidates.push({
+          country: Number(countryId),
+          cost: Number(svc.cost) || 999,
+          count: svc.count || 0,
+        });
+      }
+    }
+  }
+
+  return candidates;
+}
+
+async function heroSmsAutoSelectCountry(apiKey) {
+  const candidates = await heroSmsGetPrices(apiKey);
+
+  if (candidates.length === 0) {
+    throw new Error('Hero SMS 未找到 OpenAI（dr 服务）可用国家，请稍后重试。');
+  }
+
+  // Sort by cost ascending, then by stock descending
+  candidates.sort((a, b) => a.cost - b.cost || b.count - a.count);
+  const picked = candidates[0];
+  return { country: picked.country, cost: picked.cost, count: picked.count };
+}
+
+async function handleAddPhonePage(tabId) {
+  const state = await getState();
+  const { smsProvider, heroSmsApiKey, heroSmsCountry } = state;
+
+  if (smsProvider !== 'hero-sms' || !heroSmsApiKey) {
+    throw new Error('步骤 8：认证页进入了手机号页面。未配置接码服务（Hero SMS），无法自动处理，请在侧边栏设置接码服务。');
+  }
+
+  await addLog('步骤 8：检测到手机号页面，正在通过 Hero SMS 获取号码...', 'info');
+
+  let activationId = null;
+  try {
+    // Auto-select cheapest country if not specified
+    let resolvedCountry = heroSmsCountry;
+    if (!resolvedCountry || resolvedCountry === 0) {
+      const auto = await heroSmsAutoSelectCountry(heroSmsApiKey);
+      resolvedCountry = auto.country;
+      await addLog(`步骤 8：自动选择最便宜的国家（ID: ${resolvedCountry}，价格: $${auto.cost}，可用: ${auto.count}）`, 'info');
+    } else {
+      // Log price/availability for the selected country
+      try {
+        const prices = await heroSmsGetPrices(heroSmsApiKey, resolvedCountry);
+        if (prices.length > 0) {
+          await addLog(`步骤 8：国家 ${resolvedCountry} — 价格: $${prices[0].cost}，可用: ${prices[0].count}`, 'info');
+        } else {
+          await addLog(`步骤 8：国家 ${resolvedCountry} — 当前无可用号码，将尝试下单...`, 'warn');
+        }
+      } catch { /* non-critical */ }
+    }
+
+    // Check balance before ordering
+    try {
+      const balance = await heroSmsGetBalance(heroSmsApiKey);
+      await addLog(`[Hero SMS] 当前余额: $${balance}`, 'info');
+    } catch (e) {
+      await addLog(`[Hero SMS] 余额查询失败（非致命）：${e.message}`, 'warn');
+    }
+
+    await addLog(`[Hero SMS] 正在下单 getNumberV2（服务: ${HERO_SMS_SERVICE_CODE}，国家: ${resolvedCountry}）...`, 'info');
+    const numberInfo = await heroSmsGetNumber(heroSmsApiKey, resolvedCountry);
+    activationId = numberInfo.activationId;
+    const rawPhoneNumber = numberInfo.phoneNumber;
+    const callingCode = String(numberInfo.countryPhoneCode || HERO_SMS_COUNTRY_CALLING_CODES[resolvedCountry] || '');
+    const isoCountryCode = heroSmsResolveIsoCode(resolvedCountry, callingCode);
+    const localNumber = heroSmsStripCountryCode(rawPhoneNumber, callingCode);
+
+    await addLog(`[Hero SMS] 下单成功 — 激活ID: ${activationId}，原始号码: ${rawPhoneNumber}，区号: +${callingCode}，本地号码: ${localNumber}，国家ISO: ${isoCountryCode || '未知'}`, 'info');
+
+    // Save activationId to state for potential cleanup
+    await setState({ heroSmsActivationId: activationId });
+
+    // Fill phone number in the page
+    const fillResult = await sendToContentScriptResilient('signup-page', {
+      type: 'FILL_PHONE',
+      source: 'background',
+      payload: { countryCode: callingCode, isoCountryCode, localNumber, phoneNumber: localNumber },
+    }, {
+      timeoutMs: 15000,
+      retryDelayMs: 600,
+      logMessage: '步骤 8：正在等待手机号填写页面就绪...',
+    });
+
+    if (fillResult?.error) {
+      throw new Error(fillResult.error);
+    }
+
+    await addLog('步骤 8：手机号已填写并提交，正在等待 SMS 验证码...', 'info');
+
+    // Poll for SMS code
+    const code = await heroSmsPollCode(heroSmsApiKey, activationId);
+    await addLog(`步骤 8：已收到 SMS 验证码 ${code}，正在填写...`, 'info');
+
+    // Fill SMS code in the page
+    const codeResult = await sendToContentScriptResilient('signup-page', {
+      type: 'FILL_PHONE_SMS_CODE',
+      source: 'background',
+      payload: { code },
+    }, {
+      timeoutMs: 15000,
+      retryDelayMs: 600,
+      logMessage: '步骤 8：正在等待 SMS 验证码填写页面就绪...',
+    });
+
+    if (codeResult?.error) {
+      throw new Error(codeResult.error);
+    }
+
+    // Finish activation
+    try {
+      await heroSmsFinishActivation(heroSmsApiKey, activationId);
+      await addLog(`[Hero SMS] finishActivation 成功（激活ID: ${activationId}）`, 'info');
+    } catch (e) {
+      await addLog(`[Hero SMS] finishActivation 失败：${e.message}`, 'warn');
+    }
+    await addLog('步骤 8：手机号验证完成，继续 OAuth 流程。', 'info');
+    await setState({ heroSmsActivationId: null });
+
+  } catch (err) {
+    // Cancel activation on failure to get a refund
+    if (activationId) {
+      await addLog(`[Hero SMS] 流程失败，正在取消激活（ID: ${activationId}）以申请退款...`, 'warn');
+      await heroSmsCancelActivation(heroSmsApiKey, activationId);
+      await addLog(`[Hero SMS] 已发送取消请求`, 'info');
+      await setState({ heroSmsActivationId: null });
+    }
+    throw err;
+  }
+}
+
 async function getStep8PageState(tabId, responseTimeoutMs = 1500) {
   try {
     const result = await sendTabMessageWithTimeout(tabId, 'signup-page', {
@@ -5442,7 +5816,9 @@ async function waitForStep8Ready(tabId, timeoutMs = STEP8_READY_WAIT_TIMEOUT_MS)
     throwIfStopped();
     const pageState = await getStep8PageState(tabId);
     if (pageState?.addPhonePage) {
-      throw new Error('步骤 8：认证页进入了手机号页面，当前不是 OAuth 同意页，无法继续自动授权。');
+      await handleAddPhonePage(tabId);
+      // After phone verification, continue polling for consent page
+      continue;
     }
     if (pageState?.consentReady) {
       return pageState;
@@ -5570,7 +5946,8 @@ async function waitForStep8ClickEffect(tabId, baselineUrl, timeoutMs = STEP8_CLI
 
     const pageState = await getStep8PageState(tabId);
     if (pageState?.addPhonePage) {
-      throw new Error('步骤 8：点击“继续”后页面跳到了手机号页面，当前流程无法继续自动授权。');
+      await handleAddPhonePage(tabId);
+      return { progressed: true, reason: 'phone_verified' };
     }
     if (pageState === null) {
       if (!recovered) {

@@ -152,6 +152,35 @@
         </div>
       </div>
       <div class="data-row">
+        <span class="data-label">接码服务</span>
+        <select id="select-sms-provider" class="data-select">
+          <option value="none">无</option>
+          <option value="hero-sms">Hero SMS</option>
+        </select>
+      </div>
+      <div class="data-row" id="row-hero-sms-api-key" style="display:none;">
+        <span class="data-label">API Key</span>
+        <div class="input-with-icon">
+          <input type="password" id="input-hero-sms-api-key" class="data-input data-input-with-icon"
+            placeholder="Hero SMS API Key" />
+          <button id="btn-toggle-hero-sms-api-key" class="input-icon-btn" type="button" aria-label="显示 API Key" title="显示 API Key"></button>
+        </div>
+      </div>
+      <div class="data-row" id="row-hero-sms-country" style="display:none;">
+        <span class="data-label">接码国家</span>
+        <select id="select-hero-sms-country" class="data-select">
+          <option value="0">自动（最便宜）</option>
+          <option value="12">美国 (+1)</option>
+          <option value="16">英国 (+44)</option>
+          <option value="175">俄罗斯 (+7)</option>
+          <option value="56">印度尼西亚 (+62)</option>
+          <option value="6">印度 (+91)</option>
+          <option value="36">巴西 (+55)</option>
+          <option value="4">加拿大 (+1)</option>
+          <option value="151">菲律宾 (+63)</option>
+        </select>
+      </div>
+      <div class="data-row">
         <span class="data-label">邮箱服务</span>
         <div class="data-inline">
           <select id="select-mail-provider" class="data-select">

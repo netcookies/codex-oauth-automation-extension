@@ -65,6 +65,12 @@ const rowSub2ApiPassword = document.getElementById('row-sub2api-password');
 const inputSub2ApiPassword = document.getElementById('input-sub2api-password');
 const rowSub2ApiGroup = document.getElementById('row-sub2api-group');
 const inputSub2ApiGroup = document.getElementById('input-sub2api-group');
+const selectSmsProvider = document.getElementById('select-sms-provider');
+const rowHeroSmsApiKey = document.getElementById('row-hero-sms-api-key');
+const inputHeroSmsApiKey = document.getElementById('input-hero-sms-api-key');
+const btnToggleHeroSmsApiKey = document.getElementById('btn-toggle-hero-sms-api-key');
+const rowHeroSmsCountry = document.getElementById('row-hero-sms-country');
+const selectHeroSmsCountry = document.getElementById('select-hero-sms-country');
 const selectMailProvider = document.getElementById('select-mail-provider');
 const btnMailLogin = document.getElementById('btn-mail-login');
 const rowEmailGenerator = document.getElementById('row-email-generator');
@@ -926,6 +932,9 @@ function collectSettingsPayload() {
     sub2apiPassword: inputSub2ApiPassword.value,
     sub2apiGroupName: inputSub2ApiGroup.value.trim(),
     customPassword: inputPassword.value,
+    smsProvider: selectSmsProvider.value,
+    heroSmsApiKey: inputHeroSmsApiKey.value.trim(),
+    heroSmsCountry: Number(selectHeroSmsCountry.value) || 12,
     mailProvider: selectMailProvider.value,
     emailGenerator: selectEmailGenerator.value,
     emailPrefix: inputEmailPrefix.value.trim(),
@@ -1206,6 +1215,9 @@ function applySettingsState(state) {
   inputSub2ApiEmail.value = state?.sub2apiEmail || '';
   inputSub2ApiPassword.value = state?.sub2apiPassword || '';
   inputSub2ApiGroup.value = state?.sub2apiGroupName || '';
+  selectSmsProvider.value = state?.smsProvider === 'hero-sms' ? 'hero-sms' : 'none';
+  inputHeroSmsApiKey.value = state?.heroSmsApiKey || '';
+  selectHeroSmsCountry.value = String(state?.heroSmsCountry || 12);
   const restoredMailProvider = isCustomMailProvider(state?.mailProvider)
     || ['hotmail-api', '163', '163-vip', 'qq', 'inbucket', '2925'].includes(String(state?.mailProvider || '').trim())
     ? String(state?.mailProvider || '163').trim()
@@ -1237,6 +1249,7 @@ function applySettingsState(state) {
   updateAutoDelayInputState();
   updateFallbackThreadIntervalInputState();
   updatePanelModeUI();
+  updateSmsProviderUI();
   updateMailProviderUI();
   updateButtonStates();
 }
@@ -1800,6 +1813,12 @@ function renderHotmailAccounts() {
     </div>
   `).join('');
   updateHotmailListViewport();
+}
+
+function updateSmsProviderUI() {
+  const useHeroSms = selectSmsProvider.value === 'hero-sms';
+  rowHeroSmsApiKey.style.display = useHeroSms ? '' : 'none';
+  rowHeroSmsCountry.style.display = useHeroSms ? '' : 'none';
 }
 
 function updateMailProviderUI() {
@@ -2695,6 +2714,28 @@ btnToggleVpsUrl.addEventListener('click', () => {
 btnToggleVpsPassword.addEventListener('click', () => {
   inputVpsPassword.type = inputVpsPassword.type === 'password' ? 'text' : 'password';
   syncVpsPasswordToggleLabel();
+});
+
+btnToggleHeroSmsApiKey.addEventListener('click', () => {
+  inputHeroSmsApiKey.type = inputHeroSmsApiKey.type === 'password' ? 'text' : 'password';
+  btnToggleHeroSmsApiKey.setAttribute('aria-label', inputHeroSmsApiKey.type === 'password' ? '显示 API Key' : '隐藏 API Key');
+  btnToggleHeroSmsApiKey.setAttribute('title', inputHeroSmsApiKey.type === 'password' ? '显示 API Key' : '隐藏 API Key');
+});
+
+selectSmsProvider.addEventListener('change', () => {
+  updateSmsProviderUI();
+  markSettingsDirty(true);
+  saveSettings({ silent: true }).catch(() => { });
+});
+
+selectHeroSmsCountry.addEventListener('change', () => {
+  markSettingsDirty(true);
+  saveSettings({ silent: true }).catch(() => { });
+});
+
+inputHeroSmsApiKey.addEventListener('blur', () => {
+  markSettingsDirty(true);
+  saveSettings({ silent: true }).catch(() => { });
 });
 
 btnTestCpa.addEventListener('click', async () => {
